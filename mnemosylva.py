@@ -9,6 +9,8 @@ import webbrowser
 # --- CONFIGURATION ---
 DB_PATH = 'file_index.db'
 SCAN_DIR = os.path.expanduser('~')  # Scan user's home directory by default
+DEMO_MODE = True   # Set to False for full scan
+VERBOSE = True     # Set to False to suppress output
 
 # --- INITIAL SETUP ---
 def create_db():
@@ -31,14 +33,21 @@ def get_file_hash(path):
     try:
         with open(path, 'rb') as f:
             return hashlib.sha256(f.read()).hexdigest()
-    except:
+    except Exception as e:
+        if VERBOSE:
+            print(f"Hashing failed for {path}: {e}")
         return None
 
 # --- SCANNER FUNCTION ---
-def scan_directory(base_path):
+def scan_directory(base_path, demo_mode=False, verbose=False):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
+    file_count = 0
+    max_demo_files = 50
+
     for root, dirs, files in os.walk(base_path):
+        if verbose:
+            print(f"Scanning directory: {root}")
         for name in files:
             full_path = os.path.join(root, name)
             try:
@@ -50,8 +59,22 @@ def scan_directory(base_path):
 
                 c.execute("INSERT OR REPLACE INTO files (path, name, size, created, modified, hash) VALUES (?, ?, ?, ?, ?, ?)",
                           (full_path, name, size, created, modified, hash))
-            except:
+
+                if verbose:
+                    print(f"Indexed: {full_path}")
+
+                file_count += 1
+                if demo_mode and file_count >= max_demo_files:
+                    if verbose:
+                        print(f"Demo mode limit reached ({max_demo_files} files). Stopping scan.")
+                    conn.commit()
+                    conn.close()
+                    return
+            except Exception as e:
+                if verbose:
+                    print(f"Failed to index {full_path}: {e}")
                 continue
+
     conn.commit()
     conn.close()
 
@@ -65,7 +88,7 @@ def index():
     c.execute("SELECT name, path, size, modified FROM files ORDER BY modified DESC LIMIT 100")
     files = c.fetchall()
     conn.close()
-    
+
     html = '''
     <html><head><title>File Index</title></head>
     <body style="font-family:Arial">
@@ -88,7 +111,7 @@ def index():
 if __name__ == '__main__':
     print("Setting up database and scanning directory...")
     create_db()
-    scan_directory(SCAN_DIR)
+    scan_directory(SCAN_DIR, demo_mode=DEMO_MODE, verbose=VERBOSE)
     print("Launching web interface...")
     webbrowser.open('http://127.0.0.1:5000')
     app.run(debug=False)
