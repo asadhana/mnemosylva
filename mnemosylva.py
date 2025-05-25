@@ -1,16 +1,21 @@
 import os
 import hashlib
-import json
 import sqlite3
 from datetime import datetime
-from flask import Flask, jsonify, render_template_string
+from flask import Flask, jsonify, render_template_string, request, redirect, url_for
+import threading
 import webbrowser
 
 # --- CONFIGURATION ---
 DB_PATH = 'file_index.db'
-SCAN_DIR = os.path.expanduser('~')  # Scan user's home directory by default
-DEMO_MODE = True   # Set to False for full scan
-VERBOSE = True     # Set to False to suppress output
+SCAN_DIR = os.path.expanduser('~')
+MAX_DEMO_FILES = 50
+
+# Global state
+DEMO_MODE = True
+VERBOSE = True
+SCANNING = False
+SCANNER_THREAD = None
 
 # --- INITIAL SETUP ---
 def create_db():
@@ -28,7 +33,7 @@ def create_db():
     conn.commit()
     conn.close()
 
-# --- HASH FUNCTION ---
+# --- UTILS ---
 def get_file_hash(path):
     try:
         with open(path, 'rb') as f:
@@ -38,17 +43,29 @@ def get_file_hash(path):
             print(f"Hashing failed for {path}: {e}")
         return None
 
+def clear_index():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("DELETE FROM files")
+    conn.commit()
+    conn.close()
+
 # --- SCANNER FUNCTION ---
 def scan_directory(base_path, demo_mode=False, verbose=False):
+    global SCANNING
+    SCANNING = True
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     file_count = 0
-    max_demo_files = 50
 
     for root, dirs, files in os.walk(base_path):
+        if not SCANNING:
+            break
         if verbose:
             print(f"Scanning directory: {root}")
         for name in files:
+            if not SCANNING:
+                break
             full_path = os.path.join(root, name)
             try:
                 stat = os.stat(full_path)
@@ -56,27 +73,23 @@ def scan_directory(base_path, demo_mode=False, verbose=False):
                 modified = datetime.fromtimestamp(stat.st_mtime).isoformat()
                 size = stat.st_size
                 hash = get_file_hash(full_path)
-
                 c.execute("INSERT OR REPLACE INTO files (path, name, size, created, modified, hash) VALUES (?, ?, ?, ?, ?, ?)",
                           (full_path, name, size, created, modified, hash))
-
                 if verbose:
                     print(f"Indexed: {full_path}")
-
                 file_count += 1
-                if demo_mode and file_count >= max_demo_files:
+                if demo_mode and file_count >= MAX_DEMO_FILES:
                     if verbose:
-                        print(f"Demo mode limit reached ({max_demo_files} files). Stopping scan.")
-                    conn.commit()
-                    conn.close()
-                    return
+                        print("Demo mode limit reached. Stopping scan.")
+                    SCANNING = False
+                    break
             except Exception as e:
                 if verbose:
                     print(f"Failed to index {full_path}: {e}")
                 continue
-
     conn.commit()
     conn.close()
+    SCANNING = False
 
 # --- FLASK APP ---
 app = Flask(__name__)
@@ -88,11 +101,18 @@ def index():
     c.execute("SELECT name, path, size, modified FROM files ORDER BY modified DESC LIMIT 100")
     files = c.fetchall()
     conn.close()
-
     html = '''
     <html><head><title>File Index</title></head>
     <body style="font-family:Arial">
     <h2>Indexed Files (Top 100 by Last Modified)</h2>
+    <form method="POST" action="/action">
+        <button name="action" value="initialize">Initialize</button>
+        <label><input type="checkbox" name="clear"> Remove existing index</label>
+        <button name="action" value="scan">Scan</button>
+        <label>Directory: <input type="text" name="scan_dir" value="" /></label>
+        <label><input type="checkbox" name="demo"> Demo mode</label>
+        <button name="action" value="stop">Stop</button>
+    </form>
     <table border="1" cellpadding="5">
         <tr><th>Name</th><th>Path</th><th>Size (bytes)</th><th>Modified</th></tr>
         {% for f in files %}
@@ -107,11 +127,31 @@ def index():
     '''
     return render_template_string(html, files=files)
 
+@app.route('/action', methods=['POST'])
+def action():
+    global SCANNER_THREAD, DEMO_MODE, SCANNING
+    action_type = request.form.get('action')
+    demo = 'demo' in request.form
+    scan_dir = request.form.get('scan_dir') or SCAN_DIR
+
+    if action_type == 'initialize':
+        if 'clear' in request.form:
+            clear_index()
+        create_db()
+    elif action_type == 'scan':
+        DEMO_MODE = demo
+        if not SCANNING:
+            SCANNER_THREAD = threading.Thread(target=scan_directory, args=(scan_dir, DEMO_MODE, VERBOSE))
+            SCANNER_THREAD.start()
+    elif action_type == 'stop':
+        if SCANNING:
+#           global SCANNING
+            SCANNING = False
+
+    return redirect(url_for('index'))
+
 # --- MAIN ENTRY POINT ---
 if __name__ == '__main__':
-    print("Setting up database and scanning directory...")
     create_db()
-    scan_directory(SCAN_DIR, demo_mode=DEMO_MODE, verbose=VERBOSE)
-    print("Launching web interface...")
     webbrowser.open('http://127.0.0.1:5000')
     app.run(debug=False)
