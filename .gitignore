@@ -1,0 +1,4 @@
+# Ignore all generated or runtime files
+*.db
+*.log
+__pycache__/
